@@ -1,0 +1,331 @@
+-- HIPAA-Compliant Database Schema
+-- This schema implements security measures required for healthcare data protection
+
+-- Enable necessary extensions for encryption and security
+-- CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
+-- CREATE EXTENSION IF NOT EXISTS "pgcrypto";
+
+-- User roles and permissions table
+CREATE TABLE user_roles (
+    role_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    role_name VARCHAR(50) UNIQUE NOT NULL,
+    description TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- System users table with security features
+CREATE TABLE system_users (
+    user_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    username VARCHAR(100) UNIQUE NOT NULL,
+    email VARCHAR(255) UNIQUE NOT NULL,
+    password_hash VARCHAR(255) NOT NULL, -- Store hashed passwords only
+    role_id UUID REFERENCES user_roles(role_id),
+    is_active BOOLEAN DEFAULT TRUE,
+    last_login TIMESTAMP,
+    failed_login_attempts INT DEFAULT 0,
+    account_locked_until TIMESTAMP,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    created_by UUID REFERENCES system_users(user_id),
+    
+    -- Audit fields
+    CONSTRAINT valid_email CHECK (email ~* '^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$')
+);
+
+-- Patient information table (PHI - Protected Health Information)
+CREATE TABLE patients (
+    patient_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    
+    -- Encrypted personal identifiers
+    mrn VARCHAR(50) UNIQUE NOT NULL, -- Medical Record Number
+    ssn_encrypted BYTEA, -- Social Security Number (encrypted)
+    
+    -- Personal information (consider encryption for sensitive fields)
+    first_name VARCHAR(100) NOT NULL,
+    last_name VARCHAR(100) NOT NULL,
+    middle_name VARCHAR(100),
+    date_of_birth DATE NOT NULL,
+    gender VARCHAR(20),
+    
+    -- Contact information
+    phone_encrypted BYTEA,
+    email_encrypted BYTEA,
+    address_line1 VARCHAR(255),
+    address_line2 VARCHAR(255),
+    city VARCHAR(100),
+    state VARCHAR(50),
+    zip_code VARCHAR(20),
+    country VARCHAR(100) DEFAULT 'United States',
+    
+    -- Emergency contact
+    emergency_contact_name VARCHAR(200),
+    emergency_contact_phone_encrypted BYTEA,
+    emergency_contact_relationship VARCHAR(100),
+    
+    -- Insurance information
+    insurance_provider VARCHAR(200),
+    insurance_policy_number_encrypted BYTEA,
+    insurance_group_number VARCHAR(100),
+    
+    -- System fields
+    is_active BOOLEAN DEFAULT TRUE,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    created_by UUID REFERENCES system_users(user_id),
+    updated_by UUID REFERENCES system_users(user_id),
+    
+    -- Data retention fields
+    retention_date DATE, -- When data should be reviewed for deletion
+    consent_date DATE, -- When patient consented to data processing
+    consent_expiry DATE -- When consent expires
+);
+
+-- Healthcare providers table
+CREATE TABLE healthcare_providers (
+    provider_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    npi VARCHAR(20) UNIQUE NOT NULL, -- National Provider Identifier
+    first_name VARCHAR(100) NOT NULL,
+    last_name VARCHAR(100) NOT NULL,
+    specialty VARCHAR(200),
+    license_number VARCHAR(100),
+    phone VARCHAR(20),
+    email VARCHAR(255),
+    is_active BOOLEAN DEFAULT TRUE,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Medical encounters/visits
+CREATE TABLE medical_encounters (
+    encounter_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    patient_id UUID REFERENCES patients(patient_id) ON DELETE CASCADE,
+    provider_id UUID REFERENCES healthcare_providers(provider_id),
+    encounter_date TIMESTAMP NOT NULL,
+    encounter_type VARCHAR(100), -- Office visit, Emergency, Inpatient, etc.
+    department VARCHAR(100),
+    chief_complaint TEXT,
+    diagnosis_codes TEXT[], -- Array of ICD-10 codes
+    procedure_codes TEXT[], -- Array of CPT codes
+    notes_encrypted BYTEA, -- Encrypted clinical notes
+    
+    -- Billing information
+    total_charges DECIMAL(10,2),
+    insurance_claim_number VARCHAR(100),
+    
+    -- System fields
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    created_by UUID REFERENCES system_users(user_id),
+    updated_by UUID REFERENCES system_users(user_id)
+);
+
+-- Medications table
+CREATE TABLE medications (
+    medication_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    patient_id UUID REFERENCES patients(patient_id) ON DELETE CASCADE,
+    provider_id UUID REFERENCES healthcare_providers(provider_id),
+    medication_name VARCHAR(255) NOT NULL,
+    dosage VARCHAR(100),
+    frequency VARCHAR(100),
+    route VARCHAR(50), -- Oral, IV, etc.
+    start_date DATE,
+    end_date DATE,
+    is_active BOOLEAN DEFAULT TRUE,
+    notes TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    created_by UUID REFERENCES system_users(user_id)
+);
+
+-- Lab results table
+CREATE TABLE lab_results (
+    lab_result_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    patient_id UUID REFERENCES patients(patient_id) ON DELETE CASCADE,
+    encounter_id UUID REFERENCES medical_encounters(encounter_id),
+    test_name VARCHAR(255) NOT NULL,
+    test_code VARCHAR(50),
+    result_value VARCHAR(500),
+    reference_range VARCHAR(200),
+    unit VARCHAR(50),
+    status VARCHAR(50), -- Normal, Abnormal, Critical, etc.
+    collected_date TIMESTAMP,
+    reported_date TIMESTAMP,
+    lab_provider VARCHAR(200),
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    created_by UUID REFERENCES system_users(user_id)
+);
+
+-- Comprehensive audit log table for HIPAA compliance
+CREATE TABLE audit_log (
+    audit_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id UUID REFERENCES system_users(user_id),
+    patient_id UUID REFERENCES patients(patient_id), -- NULL for non-patient operations
+    action VARCHAR(50) NOT NULL, -- CREATE, READ, UPDATE, DELETE, LOGIN, LOGOUT
+    table_name VARCHAR(100),
+    record_id UUID, -- ID of the affected record
+    old_values JSONB, -- Previous values for UPDATE operations
+    new_values JSONB, -- New values for CREATE/UPDATE operations
+    ip_address INET,
+    user_agent TEXT,
+    session_id UUID,
+    timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    success BOOLEAN DEFAULT TRUE,
+    error_message TEXT,
+    
+    -- Additional HIPAA-specific fields
+    access_reason VARCHAR(500), -- Why the data was accessed
+    minimum_necessary BOOLEAN DEFAULT TRUE -- Was minimum necessary standard followed
+);
+
+-- Data access permissions table
+CREATE TABLE data_access_permissions (
+    permission_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id UUID REFERENCES system_users(user_id),
+    patient_id UUID REFERENCES patients(patient_id), -- NULL for global permissions
+    permission_type VARCHAR(50) NOT NULL, -- READ, WRITE, DELETE, ADMIN
+    granted_by UUID REFERENCES system_users(user_id),
+    granted_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    expiry_date TIMESTAMP,
+    is_active BOOLEAN DEFAULT TRUE,
+    justification TEXT NOT NULL -- Business justification for access
+);
+
+-- Data breach incident tracking
+CREATE TABLE security_incidents (
+    incident_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    incident_type VARCHAR(100) NOT NULL, -- Data Breach, Unauthorized Access, etc.
+    severity VARCHAR(20) NOT NULL, -- LOW, MEDIUM, HIGH, CRITICAL
+    description TEXT NOT NULL,
+    affected_patients UUID[], -- Array of patient IDs
+    discovered_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    reported_date TIMESTAMP,
+    resolved_date TIMESTAMP,
+    resolution_notes TEXT,
+    reported_by UUID REFERENCES system_users(user_id),
+    assigned_to UUID REFERENCES system_users(user_id),
+    status VARCHAR(50) DEFAULT 'OPEN', -- OPEN, INVESTIGATING, RESOLVED, CLOSED
+    
+    -- HIPAA breach notification requirements
+    breach_notification_required BOOLEAN DEFAULT FALSE,
+    notification_sent_date TIMESTAMP,
+    hhs_reported_date TIMESTAMP -- When reported to HHS
+);
+
+-- Consent management
+CREATE TABLE patient_consents (
+    consent_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    patient_id UUID REFERENCES patients(patient_id) ON DELETE CASCADE,
+    consent_type VARCHAR(100) NOT NULL, -- Treatment, Research, Marketing, etc.
+    consent_status VARCHAR(20) NOT NULL, -- GRANTED, REVOKED, EXPIRED
+    consent_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    expiry_date TIMESTAMP,
+    consent_details TEXT,
+    witnessed_by UUID REFERENCES system_users(user_id),
+    electronic_signature BYTEA, -- Encrypted signature data
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Indexes for performance and security
+CREATE INDEX idx_patients_mrn ON patients(mrn);
+CREATE INDEX idx_patients_dob ON patients(date_of_birth);
+CREATE INDEX idx_patients_name ON patients(last_name, first_name);
+CREATE INDEX idx_encounters_patient ON medical_encounters(patient_id);
+CREATE INDEX idx_encounters_date ON medical_encounters(encounter_date);
+CREATE INDEX idx_audit_log_user ON audit_log(user_id);
+CREATE INDEX idx_audit_log_patient ON audit_log(patient_id);
+CREATE INDEX idx_audit_log_timestamp ON audit_log(timestamp);
+CREATE INDEX idx_audit_log_action ON audit_log(action);
+
+-- Row Level Security (RLS) policies
+ALTER TABLE patients ENABLE ROW LEVEL SECURITY;
+ALTER TABLE medical_encounters ENABLE ROW LEVEL SECURITY;
+ALTER TABLE medications ENABLE ROW LEVEL SECURITY;
+ALTER TABLE lab_results ENABLE ROW LEVEL SECURITY;
+
+-- Example RLS policy - users can only see patients they have permission to access
+CREATE POLICY patient_access_policy ON patients
+    FOR ALL
+    TO authenticated_users
+    USING (
+        patient_id IN (
+            SELECT patient_id 
+            FROM data_access_permissions 
+            WHERE user_id = current_user_id() 
+            AND is_active = TRUE 
+            AND (expiry_date IS NULL OR expiry_date > CURRENT_TIMESTAMP)
+        )
+    );
+
+-- Trigger functions for audit logging
+CREATE OR REPLACE FUNCTION audit_trigger_function()
+RETURNS TRIGGER AS $$
+BEGIN
+    IF TG_OP = 'DELETE' THEN
+        INSERT INTO audit_log (user_id, action, table_name, record_id, old_values)
+        VALUES (current_user_id(), 'DELETE', TG_TABLE_NAME, OLD.patient_id, to_jsonb(OLD));
+        RETURN OLD;
+    ELSIF TG_OP = 'UPDATE' THEN
+        INSERT INTO audit_log (user_id, action, table_name, record_id, old_values, new_values)
+        VALUES (current_user_id(), 'UPDATE', TG_TABLE_NAME, NEW.patient_id, to_jsonb(OLD), to_jsonb(NEW));
+        RETURN NEW;
+    ELSIF TG_OP = 'INSERT' THEN
+        INSERT INTO audit_log (user_id, action, table_name, record_id, new_values)
+        VALUES (current_user_id(), 'CREATE', TG_TABLE_NAME, NEW.patient_id, to_jsonb(NEW));
+        RETURN NEW;
+    END IF;
+    RETURN NULL;
+END;
+$$ LANGUAGE plpgsql;
+
+-- Apply audit triggers to sensitive tables
+CREATE TRIGGER patients_audit_trigger
+    AFTER INSERT OR UPDATE OR DELETE ON patients
+    FOR EACH ROW EXECUTE FUNCTION audit_trigger_function();
+
+CREATE TRIGGER encounters_audit_trigger
+    AFTER INSERT OR UPDATE OR DELETE ON medical_encounters
+    FOR EACH ROW EXECUTE FUNCTION audit_trigger_function();
+
+-- Function to get current user ID (implement based on your authentication system)
+CREATE OR REPLACE FUNCTION current_user_id()
+RETURNS UUID AS $$
+BEGIN
+    -- This should return the UUID of the current authenticated user
+    -- Implementation depends on your authentication system
+    RETURN current_setting('app.current_user_id', true)::UUID;
+END;
+$$ LANGUAGE plpgsql;
+
+-- Insert default roles
+INSERT INTO user_roles (role_name, description) VALUES
+    ('ADMIN', 'System administrator with full access'),
+    ('PHYSICIAN', 'Licensed physician with patient care access'),
+    ('NURSE', 'Registered nurse with patient care access'),
+    ('TECHNICIAN', 'Lab/imaging technician with limited access'),
+    ('BILLING', 'Billing staff with financial data access'),
+    ('RECEPTIONIST', 'Front desk staff with appointment access'),
+    ('AUDITOR', 'Compliance auditor with read-only access');
+
+-- Views for common queries (with built-in security)
+CREATE VIEW patient_summary AS
+SELECT 
+    p.patient_id,
+    p.mrn,
+    p.first_name,
+    p.last_name,
+    p.date_of_birth,
+    p.gender,
+    p.phone_encrypted,
+    p.created_at,
+    COUNT(e.encounter_id) as total_encounters,
+    MAX(e.encounter_date) as last_visit
+FROM patients p
+LEFT JOIN medical_encounters e ON p.patient_id = e.patient_id
+WHERE p.is_active = TRUE
+GROUP BY p.patient_id, p.mrn, p.first_name, p.last_name, p.date_of_birth, p.gender, p.phone_encrypted, p.created_at;
+
+-- Grant appropriate permissions (customize based on your needs)
+-- GRANT SELECT, INSERT, UPDATE ON patients TO physician_role;
+-- GRANT SELECT ON patients TO nurse_role;
+-- GRANT SELECT ON audit_log TO auditor_role;
